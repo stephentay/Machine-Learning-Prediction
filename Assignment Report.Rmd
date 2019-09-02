@@ -1,0 +1,197 @@
+Practical Machine Learning: Prediction Project
+====================================================
+by Stephen Tay
+
+## Background of this Project and Dataset
+The goal of this project is to use data from wearable accelerometers to predict the manner in which six participants did the weight lifting exercise. The five manners of weight lifting which the data are to predict are as follows:
+
+- **Class A**: Correct execution of a dumbbell biceps curl
+- **Class B**: Throwing the elbows to the front
+- **Class C**: Lifting the dumbbell only halfway
+- **Class D**: Lowering the dumbbell only halfway
+- **Class E**: Throwing the hips to the front
+
+*Note: Classes B-E correspond to the common mistakes of doing dumbbell biceps curls. Details of this study and the dataset are available here: http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har *
+
+The source reference of this Weight Lifting Exercise dataset is as follows: 
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. **Qualitative Activity Recognition of Weight Lifting Exercises**. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+
+## Download File
+```{r download, cache=TRUE}
+if(!file.exists("./data")){dir.create("./data")}
+fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+download.file(fileUrl, destfile = "./data/dataset.csv", method = "curl")
+```
+
+## Read and Clean Data
+While reading the .csv file, all cells which are empty, "NA" or erroneous are converted to become NA in the dataset. The dataset has 19622 obs with 160 variables. At the first look, it seems that there are many columns with missing data.
+```{r read, cache=TRUE}
+dataset <- read.csv("./data/dataset.csv", na.strings= c("", "NA", "#DIV/0!"))
+str(dataset)
+```
+
+The proportion of missing data for each column is determined. Given that the proportion of missing data in some columns are very high (e.g. more than 90% of the column is NA), it would not be meaningful to impute these missing data. 
+```{r clean 1}
+NAproportion <- colMeans(is.na(dataset))
+print(NAproportion)
+```
+
+To have a more accurate prediction, columns with more than 10% missing data are removed. As the first seven columns of the dataset are administrative (e.g. *username*, *timestamp*), these columns are removed as well. The cleaned dataset has 53 variables (including the outcome variable *"classe"*).
+```{r clean 2}
+df <- dataset[,NAproportion < 0.1]
+df <- df[,-c(1:7)]
+dim(df)
+```
+
+## Set Seed
+```{r setseed}
+set.seed(2019)
+```
+
+## Create Training, Test and Validation Sets
+The dataset is split into three datasets - training, test and validation sets. The validation set is meant to be a stand-by dataset in the event that I decide to use *model ensembling*, or if I need to choose between algorithms based on the test set which, in turn, requires additional validation. 
+
+There are 9619 obs in the training set, 4118 obs in the test set, and 5885 in the validation set. 
+```{r split datasets}
+library(lattice)
+library(ggplot2)
+library(caret)
+inValidate <- createDataPartition(y=df$classe, p=0.7, list=FALSE)
+validation <- df[-inValidate,]
+trainTestData <- df[inValidate,]
+
+inTrain <- createDataPartition(y=trainTestData$classe, p=0.7, list = FALSE)
+training <- trainTestData[inTrain,]
+testing <- trainTestData[-inTrain,]
+
+dim(training)
+dim(testing)
+dim(validation)
+```
+
+
+## Exploratory Data Analysis (EDA)
+### EDA: Summary of Outcome Variable
+The outcome variable has 5 categories, and this limits the ML algorithms that we can choose from (e.g. we can't use linear or logistics regression). 
+```{r classe summary}
+table(training$classe)
+```
+
+### EDA: Correlation
+The correlation plot shows that while several variables are highly correlated (i.e. dark coloured squares), majority of the variables are not (i.e. white/lightly coloured squares). As several variables are highly correlated, we can't use Naive Bayes algorithm which assumes independence between features.
+```{r correlation, fig.height = 5}
+library(corrplot)
+correlationMatrix <- cor(training[,-53])
+corrplot(correlationMatrix, tl.cex = 0.5, tl.col="black")
+```
+
+### EDA: Multinomial Logistics Regression
+In order to have a quick overview of those features that are associated with the outcome variable, a multinomial logistics regression is conducted. Based on the average p-value of the features, we could see which variables that may be strong predictors of the outcome, and which may not. There are 26 features that are strongly associated with the outcome variable (i.e. average p-value is less than 0.05; note that the *Intercept* is not counted).
+```{r multinomial 1, cache=TRUE, results="hide"}
+library(nnet)
+model <- multinom(classe ~., data= training)
+```
+```{r multinomial 2, cache=TRUE}
+zvalues <- summary(model)$coefficients / summary(model)$standard.errors
+pvalues <- pnorm(abs(zvalues), lower.tail=FALSE)*2
+avePvalues <- colMeans(pvalues)
+names(avePvalues[avePvalues<0.05])
+```
+
+And there are 26 features that may be weak predictors of the outcome variable (i.e. average p-value is more than 0.05). 
+```{r multinomial 3}
+names(avePvalues[avePvalues>0.05])
+```
+
+
+## Algorithm Selection Using Training Set
+We will try out three algorithms on the training set:
+
+- **Boosting with Trees**: given that out of 52 features, 26 features may be weak predictors of the outcome variable. Boosting could take lots of weak predictors, weight them and add them up to get a stronger predictor. 
+- **Random Forests**: since this algorithm tends to yield predictions of very high accuracy.
+- **Linear Discriminant Analysis**: an algorithm that could potentially discriminate the classes of the outcome variable.
+
+Should the in-sample accuracies of the above three algorithms are not high, I may consider *model ensembling* (i.e. combining algorithms) to yield better predictions.
+
+
+### Algorithm 1 - Boosting with Trees
+The in-sample accuracy of **Boosting** is 97.75%, and the in-sample error is 2.25%. This accuracy is considered very good:
+```{r gbm train 1, cache=TRUE}
+modgbm <- train(classe ~ ., data=training, method="gbm", verbose = FALSE)
+```
+
+```{r gbm train 2}
+##In-sample Error for Boosting with Trees
+confusionMatrixBoost <- confusionMatrix(training$classe, predict(modgbm, training))
+print(confusionMatrixBoost)
+paste("The in-sample error rate for Boosting is ", round((1- as.numeric(confusionMatrixBoost$overall[1]))*100, 2), "%", sep ="")
+```
+
+
+### Algorithm 2 - Random Forests
+The in-sample accuracy of **Random Forests** is 100%, and the in-sample error is 0%. This accuracy, although very good, is expected given that this algorithm tends to overfit:
+```{r rf train 1, cache=TRUE}
+modrf <- train(classe ~ ., data=training, method="rf")
+```
+
+```{r rf train 2}
+##In-sample Error for Random Forests
+confusionMatrixRF <- confusionMatrix(training$classe, predict(modrf, training))
+print(confusionMatrixRF)
+paste("The in-sample error rate for RF is ", round((1- as.numeric(confusionMatrixRF$overall[1]))*100, 2), "%", sep ="")
+```
+
+
+### Algorithm 3 - Linear Discriminant Analysis
+The in-sample accuracy of **Linear Discriminant Analysis** is 71.2%, and the in-sample error is 28.8%. The accuracy of LDA is not as good as Boosting and RF:
+```{r lda train 1, cache=TRUE}
+library(e1071)
+modlda <- train(classe ~ ., data=training, method="lda")
+```
+
+```{r lda train 2}
+confusionMatrixLDA <- confusionMatrix(training$classe, predict(modlda, training))
+print(confusionMatrixLDA)
+paste("The in-sample error rate for LDA is ", round((1- as.numeric(confusionMatrixLDA$overall[1]))*100, 2), "%", sep ="")
+```
+
+
+## Cross-validation (Evaluate Boosting and RF on the Test Set)
+Given the good performance on the training set, **Boosting** and **Random Forests** are selected for cross-validation on the test set. There is a possibility that Random Forests performs worse than Boosting on the test set because Random Forests tends to overfit. As the in-sample accuracies of Boosting and Random Forests are very high (97.75% and 100% respectively), there is no need to conduct *model ensembling*.
+
+### Out-of-sample Error for Boosting with Trees
+The out-of-sample accuracy of **Boosting** is 96.58%, and the out-of-sample error is 3.42%, which is still considered to be very good. 
+```{r gbm test}
+testCMBoost <- confusionMatrix(testing$classe, predict(modgbm, testing))
+print(testCMBoost)
+testOSEboost <- round((1- as.numeric(testCMBoost$overall[1]))*100, 2)
+paste("The out-of-sample error rate for Boosting is ", testOSEboost, "%", sep ="")
+```
+
+
+### Out-of-sample Error for Random Forests
+The out-of-sample accuracy of **Random Forests** is 98.86%, and the out-of-sample error is 1.14%. The performance of Random Forests is still very good on the test set, and it is better than Boosting.
+```{r rf test}
+testCMRF <- confusionMatrix(testing$classe, predict(modrf, testing))
+print(testCMRF)
+testOSErf <- round((1- as.numeric(testCMRF$overall[1]))*100, 2)
+paste("The out-of-sample error rate for RF is ", testOSErf, "%", sep ="")
+```
+
+
+## Final Validation on the Selected Model (i.e Evaluate RF on the Validation Set)
+Now, we will validate the **Random Forests** on the validation set. The accuracy of Random Forests is 98.74%, and the error is 1.26%.
+```{r validate}
+valCMRF <- confusionMatrix(validation$classe, predict(modrf, validation))
+print(valCMRF)
+valOSErf <- round((1- as.numeric(valCMRF$overall[1]))*100, 2)
+paste("The out-of-sample error rate for RF is ", valOSErf, "%", sep ="")
+```
+
+The average out-of-sample error rate of Random Forests on the test and validation sets is 1.20%. This is very good.
+```{r averageOSE}
+averageOSE <- mean(c(testOSErf,valOSErf))
+paste("The average out-of-sample error rate for RF is ", averageOSE, "%", sep ="")
+```
